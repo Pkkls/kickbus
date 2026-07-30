@@ -28,6 +28,14 @@ And run the daemon:
 kickbus -addr :8787
 ```
 
+Give the daemon the same credentials and it keeps the subscription alive by itself:
+
+```sh
+KICK_CLIENT_ID=... KICK_CLIENT_SECRET=... kickbus -addr :8787 -broadcaster 123456
+```
+
+Every thirty minutes it lists the app's subscriptions and recreates whatever is missing. Without credentials it still runs, it just cannot repair anything, and it says so at startup.
+
 ## Consuming
 
 ```sh
@@ -69,6 +77,8 @@ The webhook URL is public and every request costs an RSA verification, measured 
 Signature verification follows the documented scheme: RSA-SHA256 over `<message-id>.<timestamp>.<raw body>`, base64 in the `Kick-Event-Signature` header, against Kick's published public key.
 
 A bus that stopped being fed looks exactly like a healthy idle one, and Kick unsubscribes an app after a day of failed deliveries. So `/health` reports `seconds_since_last_event`, null until the first event ever arrives. That is the field worth alerting on.
+
+Reporting that outage is not the same as surviving it, so given credentials the daemon repairs it: it lists the app's subscriptions every thirty minutes and recreates only what is missing, leaving existing ones untouched. `/health` carries `subscriptions`, `subscriptions_checked_at`, and `subscriptions_error` when the last attempt failed.
 
 That key is not pinned. A copy is embedded so the daemon works offline, but at startup and every six hours it fetches the key Kick publishes and switches if it changed. Pinning would turn a key rotation into a silent outage: every webhook would fail verification and Kick unsubscribes an app after a day of failures. `/health` reports `key_source` as `published` or `embedded`, which is the first thing to check when signatures start failing. Use `-offline` to skip the fetch entirely.
 

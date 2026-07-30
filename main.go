@@ -32,6 +32,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -278,6 +279,11 @@ type Server struct {
 	verify chan struct{} // tokens bounding concurrent RSA verifications
 	wait   time.Duration // how long to wait for a token before returning 503
 	now    func() time.Time
+
+	// Subscription health, written by the watcher and read by /health.
+	subsCount       atomic.Int64
+	subsCheckedUnix atomic.Int64
+	subsErr         atomic.Pointer[string]
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -416,6 +422,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	// Null rather than zero when nothing has arrived yet, so a monitor can tell
 	// "never fed" apart from "fed a second ago".
+	if checked := s.subsCheckedUnix.Load(); checked > 0 {
+		body["subscriptions"] = s.subsCount.Load()
+		body["subscriptions_checked_at"] = time.Unix(checked, 0).UTC().Format(time.RFC3339)
+		if err := s.subsErr.Load(); err != nil {
+			body["subscriptions_error"] = *err
+		}
+	}
 	if last := s.hub.lastEventAt(); last.IsZero() {
 		body["last_event_at"] = nil
 		body["seconds_since_last_event"] = nil
@@ -515,6 +528,16 @@ func main() {
 		go srv.keys.watch(context.Background(), keyRefreshEvery)
 	}
 	log.Printf("signing key in use: %s", srv.keys.source())
+
+	// With credentials on hand the daemon can repair the outage it would
+	// otherwise only report: Kick drops an app's subscriptions after a day of
+	// failed deliveries, and nothing recreates them on its own.
+	if *clientID != "" && *clientSecret != "" {
+		go srv.watchSubscriptions(context.Background(), *clientID, *clientSecret, *broadcaster,
+			strings.Split(*events, ","), subscriptionCheckEvery)
+	} else {
+		log.Print("no credentials given, subscriptions will not be checked or repaired")
+	}
 
 	log.Printf("kickbus listening on %s (webhook: POST /kick/webhook, stream: GET /events)", *addr)
 	httpSrv := &http.Server{
