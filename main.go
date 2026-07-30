@@ -261,7 +261,7 @@ func (h *Hub) stats() (subs, total, dropped int) {
 
 type Server struct {
 	hub    *Hub
-	key    *rsa.PublicKey
+	keys   *keyHolder
 	start  time.Time
 	verify chan struct{} // tokens bounding concurrent RSA verifications
 	wait   time.Duration // how long to wait for a token before returning 503
@@ -310,7 +310,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := verifySignature(s.key, msgID, ts, body, sig); err != nil {
+	if err := verifySignature(s.keys.get(), msgID, ts, body, sig); err != nil {
 		log.Printf("signature rejected (msg %s): %v", msgID, err)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
@@ -401,6 +401,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"subscribers":    subs,
 		"events_total":   total,
 		"events_dropped": dropped,
+		"key_source":     s.keys.source(),
 	})
 }
 
@@ -416,7 +417,7 @@ func (s *Server) routes() *http.ServeMux {
 func NewServer(key *rsa.PublicKey, keep int) *Server {
 	return &Server{
 		hub:    NewHub(keep),
-		key:    key,
+		keys:   newKeyHolder(key),
 		start:  time.Now(),
 		verify: make(chan struct{}, maxConcurrentVerify),
 		wait:   verifyWaitBudget,
@@ -428,6 +429,7 @@ func main() {
 	addr := flag.String("addr", ":8787", "listen address")
 	keyPath := flag.String("key", "", "path to a PEM public key (default: embedded Kick key)")
 	keep := flag.Int("keep", 500, "how many events to retain for /recent")
+	offline := flag.Bool("offline", false, "never fetch Kick's published key, use the embedded one")
 	subscribe := flag.Bool("subscribe", false, "create a subscription, then exit")
 	list := flag.Bool("list", false, "list subscriptions, then exit")
 	clientID := flag.String("client-id", os.Getenv("KICK_CLIENT_ID"), "Kick app client ID")
@@ -473,6 +475,25 @@ func main() {
 	}
 
 	srv := NewServer(key, *keep)
+
+	// Prefer the key Kick publishes right now over the one compiled in months
+	// ago. A network failure here is survivable, a stale key is not.
+	if *keyPath == "" && !*offline {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		rotated, err := srv.keys.refresh(ctx)
+		cancel()
+		switch {
+		case err != nil:
+			log.Printf("could not fetch the published key, using the embedded one: %v", err)
+		case rotated:
+			log.Print("published key differs from the embedded one, using the published key")
+		default:
+			log.Print("verifying against Kick's published key, identical to the embedded one")
+		}
+		go srv.keys.watch(context.Background(), keyRefreshEvery)
+	}
+	log.Printf("signing key in use: %s", srv.keys.source())
+
 	log.Printf("kickbus listening on %s (webhook: POST /kick/webhook, stream: GET /events)", *addr)
 	httpSrv := &http.Server{
 		Addr:              *addr,
