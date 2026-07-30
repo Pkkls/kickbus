@@ -301,6 +301,64 @@ func TestSSEOverLimitGets503(t *testing.T) {
 	}
 }
 
+// A bus nobody feeds looks healthy, so /health has to expose the staleness that
+// tells an operator the subscription is gone.
+func TestHealthReportsEventStaleness(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(&priv.PublicKey, 10)
+	ts := httptest.NewServer(srv.routes())
+	defer ts.Close()
+
+	health := func() map[string]any {
+		res, err := http.Get(ts.URL + "/health")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out map[string]any
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	before := health()
+	if before["last_event_at"] != nil || before["seconds_since_last_event"] != nil {
+		t.Fatalf("nothing received yet must report null, got %v", before)
+	}
+
+	// Freeze time so the staleness assertion cannot flake.
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	srv.now = func() time.Time { return now }
+
+	body := `{"broadcaster":{"user_id":5}}`
+	stamp := now.Format(time.RFC3339)
+	if got := post(t, ts, "fresh", stamp, body, sign(t, priv, "fresh", stamp, body), "chat.message.sent"); got != 200 {
+		t.Fatalf("event rejected: %d", got)
+	}
+
+	after := health()
+	if after["last_event_at"] != now.Format(time.RFC3339) {
+		t.Fatalf("last_event_at wrong: %v", after["last_event_at"])
+	}
+	if after["seconds_since_last_event"] != float64(0) {
+		t.Fatalf("expected 0 seconds of staleness, got %v", after["seconds_since_last_event"])
+	}
+
+	// Two hours later, with no new event, the gap must be visible.
+	srv.now = func() time.Time { return now.Add(2 * time.Hour) }
+	stale := health()
+	if stale["seconds_since_last_event"] != float64(7200) {
+		t.Fatalf("expected 7200 seconds of staleness, got %v", stale["seconds_since_last_event"])
+	}
+	if stale["last_event_at"] != now.Format(time.RFC3339) {
+		t.Fatal("last_event_at must not move when nothing arrives")
+	}
+}
+
 func TestSlowConsumerIsDroppedNotBlocking(t *testing.T) {
 	hub := NewHub(5)
 	sub := &subscriber{ch: make(chan Event, 1), types: map[string]bool{}}

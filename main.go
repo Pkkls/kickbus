@@ -164,6 +164,7 @@ type Hub struct {
 	seen        map[string]time.Time
 	dropped     int
 	total       int
+	lastEvent   time.Time
 }
 
 func NewHub(keep int) *Hub {
@@ -192,6 +193,7 @@ func (h *Hub) seenBefore(id string, now time.Time) bool {
 func (h *Hub) Publish(e Event) {
 	h.mu.Lock()
 	h.total++
+	h.lastEvent = e.ReceivedAt
 	h.recent = append(h.recent, e)
 	h.recentBytes += len(e.Data)
 	// Two bounds: event count and cumulative weight. The second is the one that
@@ -257,6 +259,16 @@ func (h *Hub) stats() (subs, total, dropped int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs), h.total, h.dropped
+}
+
+// lastEventAt is the health signal that matters for a webhook receiver: Kick
+// unsubscribes an app after a day of failed deliveries, and a bus that has
+// stopped being fed looks exactly like a healthy idle one. Zero means nothing
+// has ever arrived.
+func (h *Hub) lastEventAt() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastEvent
 }
 
 type Server struct {
@@ -395,14 +407,24 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	subs, total, dropped := s.hub.stats()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	body := map[string]any{
 		"uptime_seconds": int(time.Since(s.start).Seconds()),
 		"subscribers":    subs,
 		"events_total":   total,
 		"events_dropped": dropped,
 		"key_source":     s.keys.source(),
-	})
+	}
+	// Null rather than zero when nothing has arrived yet, so a monitor can tell
+	// "never fed" apart from "fed a second ago".
+	if last := s.hub.lastEventAt(); last.IsZero() {
+		body["last_event_at"] = nil
+		body["seconds_since_last_event"] = nil
+	} else {
+		body["last_event_at"] = last.UTC().Format(time.RFC3339)
+		body["seconds_since_last_event"] = int(s.now().Sub(last).Seconds())
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) routes() *http.ServeMux {

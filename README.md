@@ -36,12 +36,18 @@ curl -N "http://localhost:8787/events?type=chat.message.sent&broadcaster=123456"
 
 Both query parameters are optional. `type` accepts a comma-separated list.
 
+`examples/consumer.py` is a working consumer in about sixty lines of standard library Python, with reconnection and backoff:
+
+```sh
+python examples/consumer.py --url http://localhost:8787 --broadcaster 123456
+```
+
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /kick/webhook` | where Kick delivers events |
 | `GET /events` | SSE stream, filtered by `type` and `broadcaster` |
 | `GET /recent` | buffered recent events as JSON |
-| `GET /health` | uptime, subscriber count, totals, drops, active key source |
+| `GET /health` | uptime, subscribers, totals, drops, key source, time since the last event |
 
 ## Build
 
@@ -61,6 +67,8 @@ Bodies cap at 64 KB and the `/recent` buffer caps at 2 MB total, not just at an 
 The webhook URL is public and every request costs an RSA verification, measured at 26us on a desktop CPU and roughly 2ms on a RISC-V C906. So the cheap checks run first: a 5 minute freshness window on the signed timestamp, then a cap of 4 concurrent verifications that answers 503 rather than queuing work. Duplicates answer 200 on purpose, because Kick unsubscribes an app after a day of failed deliveries.
 
 Signature verification follows the documented scheme: RSA-SHA256 over `<message-id>.<timestamp>.<raw body>`, base64 in the `Kick-Event-Signature` header, against Kick's published public key.
+
+A bus that stopped being fed looks exactly like a healthy idle one, and Kick unsubscribes an app after a day of failed deliveries. So `/health` reports `seconds_since_last_event`, null until the first event ever arrives. That is the field worth alerting on.
 
 That key is not pinned. A copy is embedded so the daemon works offline, but at startup and every six hours it fetches the key Kick publishes and switches if it changed. Pinning would turn a key rotation into a silent outage: every webhook would fail verification and Kick unsubscribes an app after a day of failures. `/health` reports `key_source` as `published` or `embedded`, which is the first thing to check when signatures start failing. Use `-offline` to skip the fetch entirely.
 
