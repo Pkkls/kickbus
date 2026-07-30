@@ -1,0 +1,10 @@
+#!/bin/sh
+# Persistence for busybox init: rcS runs this with "start" at boot.
+# Keepalive loop, restarts kickbus if it dies.
+[ "$1" = "start" ] || exit 0
+(
+  while true; do
+    /root/kickbus/kickbus-riscv64 -addr :8787 >> /root/kickbus/kickbus.log 2>&1
+    sleep 10
+  done
+) &
