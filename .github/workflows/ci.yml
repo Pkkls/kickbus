@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Test with the race detector
+        run: go test -race -count=1 ./...
+
+  # The daemon is meant for small boards, so a build that only works on the
+  # maintainer's machine is not good enough.
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build every release target
+        run: |
+          set -e
+          for t in "linux riscv64" "linux amd64" "linux arm64" "linux arm" "windows amd64" "darwin arm64"; do
+            set -- $t
+            echo "building $1/$2"
+            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" -o /dev/null .
+          done
