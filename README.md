@@ -1,5 +1,7 @@
 # kickbus
 
+[![ci](https://github.com/Pkkls/kickbus/actions/workflows/ci.yml/badge.svg)](https://github.com/Pkkls/kickbus/actions/workflows/ci.yml)
+
 Receives webhooks from the official Kick API, verifies their signature, and fans the events out to local consumers over Server-Sent Events.
 
 One daemon holds the relationship with Kick. Every bot on your network reads from it with a single HTTP request, and none of them needs credentials.
