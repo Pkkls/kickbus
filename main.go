@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -541,9 +542,23 @@ func main() {
 
 	log.Printf("kickbus listening on %s (webhook: POST /kick/webhook, stream: GET /events)", *addr)
 	httpSrv := &http.Server{
-		Addr:              *addr,
-		Handler:           srv.routes(),
-		ReadHeaderTimeout: 10 * time.Second,
+		Addr:    *addr,
+		Handler: srv.routes(),
+		// ReadHeaderTimeout alone leaves the body unbounded in time. A client
+		// that sends valid headers and then trickles the body occupies a
+		// goroutine and its buffer for as long as it likes, which on a 128 MB
+		// board is the cheapest way to take the daemon down: the RSA semaphore
+		// never even sees those requests.
+		ReadTimeout: 20 * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
-	log.Fatal(httpSrv.ListenAndServe())
+
+	listener, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	// Timeouts bound how long one connection lasts; this bounds how many exist
+	// at once. Without it a burst of fast connections still allocates a
+	// goroutine and up to maxBodyBytes each, with nothing to stop it.
+	log.Fatal(httpSrv.Serve(limitListener(listener, maxConnections)))
 }
