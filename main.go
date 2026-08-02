@@ -285,6 +285,10 @@ type Server struct {
 	subsCount       atomic.Int64
 	subsCheckedUnix atomic.Int64
 	subsErr         atomic.Pointer[string]
+
+	// Sante des boucles de fond. Un panic recupere doit rester visible : sans
+	// ca, la supervision transforme un crash en panne muette.
+	bg backgroundHealth
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +425,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"events_dropped": dropped,
 		"key_source":     s.keys.source(),
 	}
+	// Une boucle de fond qui a panique et redemarre reste une anomalie : elle a
+	// rate au moins un cycle d'entretien. Le compteur ne redescend jamais.
+	if n := s.bg.panics.Load(); n > 0 {
+		body["background_panics"] = n
+		if last := s.bg.lastFail.Load(); last != nil {
+			body["background_last_panic"] = *last
+		}
+	}
 	// Null rather than zero when nothing has arrived yet, so a monitor can tell
 	// "never fed" apart from "fed a second ago".
 	if checked := s.subsCheckedUnix.Load(); checked > 0 {
@@ -526,7 +538,9 @@ func main() {
 		default:
 			log.Print("verifying against Kick's published key, identical to the embedded one")
 		}
-		go srv.keys.watch(context.Background(), keyRefreshEvery)
+		go supervise(context.Background(), "key-refresh", &srv.bg, func() {
+			srv.keys.watch(context.Background(), keyRefreshEvery)
+		})
 	}
 	log.Printf("signing key in use: %s", srv.keys.source())
 
@@ -534,8 +548,10 @@ func main() {
 	// otherwise only report: Kick drops an app's subscriptions after a day of
 	// failed deliveries, and nothing recreates them on its own.
 	if *clientID != "" && *clientSecret != "" {
-		go srv.watchSubscriptions(context.Background(), *clientID, *clientSecret, *broadcaster,
-			strings.Split(*events, ","), subscriptionCheckEvery)
+		go supervise(context.Background(), "subscription-repair", &srv.bg, func() {
+			srv.watchSubscriptions(context.Background(), *clientID, *clientSecret, *broadcaster,
+				strings.Split(*events, ","), subscriptionCheckEvery)
+		})
 	} else {
 		log.Print("no credentials given, subscriptions will not be checked or repaired")
 	}
