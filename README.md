@@ -12,6 +12,15 @@ kick.com's realtime gateway is closed to server clients. Cloudflare rejects both
 
 ## Setup
 
+Build first. The module path is local, so `go install` does not apply:
+
+```sh
+git clone https://github.com/Pkkls/kickbus.git
+cd kickbus && go build
+```
+
+Kick pushes to you, so the daemon needs an address Kick can reach over HTTPS. A reverse proxy or a tunnel in front of `:8787` is enough; nothing here terminates TLS.
+
 Create an app at [kick.com/settings/developer](https://kick.com/settings/developer), enable webhooks, and point the webhook URL at `https://your-host/kick/webhook`.
 
 Then subscribe:
@@ -43,6 +52,16 @@ curl -N "http://localhost:8787/events?type=chat.message.sent&broadcaster=123456"
 ```
 
 Both query parameters are optional. `type` accepts a comma-separated list.
+
+Each event arrives as a standard SSE frame, the data being Kick's payload passed through untouched:
+
+```
+id: 01K4...
+event: chat.message.sent
+data: {"message_id":"...","broadcaster":{...},"sender":{...},"content":"hello"}
+```
+
+`-subscribe` defaults to `chat.message.sent`; pass `-events` a comma-separated list for anything else Kick publishes.
 
 `examples/consumer.py` is a working consumer in about sixty lines of standard library Python, with reconnection and backoff:
 
@@ -81,6 +100,13 @@ A bus that stopped being fed looks exactly like a healthy idle one, and Kick uns
 Reporting that outage is not the same as surviving it, so given credentials the daemon repairs it: it lists the app's subscriptions every thirty minutes and recreates only what is missing, leaving existing ones untouched. `/health` carries `subscriptions`, `subscriptions_checked_at`, and `subscriptions_error` when the last attempt failed.
 
 That key is not pinned. A copy is embedded so the daemon works offline, but at startup and every six hours it fetches the key Kick publishes and switches if it changed. Pinning would turn a key rotation into a silent outage: every webhook would fail verification and Kick unsubscribes an app after a day of failures. `/health` reports `key_source` as `published` or `embedded`, which is the first thing to check when signatures start failing. Use `-offline` to skip the fetch entirely.
+
+## Related projects
+
+- [kick-core](https://github.com/Pkkls/kick-core), the browser-side counterpart: Kick's realtime gateway from an extension service worker
+- [kick-chat-translator](https://github.com/Pkkls/kick-chat-translator), live chat translation, on the Chrome Web Store and Mozilla Add-ons
+- [kick-ad-blocker](https://github.com/Pkkls/kick-ad-blocker), blocks Kick's pre-roll and overlay ads
+- [kick-drops-miner](https://github.com/Pkkls/kick-drops-miner), Windows app that progresses Kick drop watch-time
 
 ## License
 
