@@ -76,6 +76,16 @@ python examples/consumer.py --url http://localhost:8787 --broadcaster 123456
 | `GET /recent` | buffered recent events as JSON |
 | `GET /health` | uptime, subscribers, totals, drops, key source, time since the last event |
 
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-addr` | `:8787` | listen address |
+| `-broadcaster` | none | channel id to keep subscribed |
+| `-subscribe` / `-list` | off | one-shot subscription management, then exit |
+| `-events` | `chat.message.sent` | comma-separated events for `-subscribe` |
+| `-keep` | 500 | how many events `/recent` holds |
+| `-key` | none | PEM public key to verify against, instead of the published one |
+| `-offline` | off | never fetch the published key, use the embedded copy |
+
 ## Build
 
 ```sh
@@ -91,11 +101,13 @@ The daemon is sized for a 128 MB single-board computer, so several limits are de
 
 Bodies cap at 64 KB and the `/recent` buffer caps at 2 MB total, not just at an event count. Subscribers cap at 16, each with a 16-event queue, which bounds consumer memory at roughly 16 MB. A slow consumer loses events, counted in `/health`, instead of stalling the bus.
 
-The webhook URL is public and every request costs an RSA verification, measured at 26us on a desktop CPU and roughly 2ms on a RISC-V C906. So the cheap checks run first: a 5 minute freshness window on the signed timestamp, then a cap of 4 concurrent verifications that answers 503 rather than queuing work. Duplicates answer 200 on purpose, because Kick unsubscribes an app after a day of failed deliveries.
+The webhook URL is public and every request costs an RSA verification, measured at 26us on a desktop CPU and roughly 2ms on a RISC-V C906. So the cheap checks run first: a 5 minute freshness window on the signed timestamp, then a cap of 4 concurrent verifications, which waits 2 seconds for a slot and answers 503 rather than queuing indefinitely. Accepted connections cap at 64 in total, refused above that and counted. Duplicates answer 200 on purpose, because Kick unsubscribes an app after a day of failed deliveries.
 
 Signature verification follows the documented scheme: RSA-SHA256 over `<message-id>.<timestamp>.<raw body>`, base64 in the `Kick-Event-Signature` header, against Kick's published public key.
 
 A bus that stopped being fed looks exactly like a healthy idle one, and Kick unsubscribes an app after a day of failed deliveries. So `/health` reports `seconds_since_last_event`, null until the first event ever arrives. That is the field worth alerting on.
+
+The two supervised background loops report themselves the same way. A panic in either is counted in `/health` under `background_panics`, with `background_last_panic` naming the loop, both fields absent until one happens. A loop that died silently while the process stayed up and `/health` kept answering is the failure that shape exists to make visible.
 
 Reporting that outage is not the same as surviving it, so given credentials the daemon repairs it: it lists the app's subscriptions every thirty minutes and recreates only what is missing, leaving existing ones untouched. `/health` carries `subscriptions`, `subscriptions_checked_at`, and `subscriptions_error` when the last attempt failed.
 
